@@ -7,6 +7,9 @@ import tempfile
 import typing
 
 from .dll import Kernel32, NT
+from .injector import Injector
+from .namespace import Namespace
+from .scanner import CachedRawMemoryPatternScanner
 from .util import align16, pid_by_executable, DEFAULT_CODING
 
 _T = typing.TypeVar("_T")
@@ -115,56 +118,6 @@ class LDR_DATA_TABLE_ENTRY(LIST_ENTRY):
 
 
 class Process:
-    class Namespace:
-        chunk_size = 0x10000
-
-        def __init__(self, process: "Process"):
-            self.process = process
-            self.res = []
-            self.ptr = 0
-            self.remain = 0
-            self._protection = 0x40  # PAGE_EXECUTE_READWRITE
-
-        @property
-        def protection(self):
-            return self._protection
-
-        @protection.setter
-        def protection(self, v):
-            self._protection = v
-            for alloc_addr, alloc_size in self.res:
-                self.process.virtual_protect(alloc_addr, alloc_size, v)
-
-        def store(self, data: bytes):
-            self.process.write(p_buf := self.take(len(data)), data)
-            return p_buf
-
-        def take(self, size):
-            size = align16(size)
-            if self.remain < size:
-                alloc_size = max(self.chunk_size, size)
-                alloc_addr = self.process.alloc(alloc_size)
-                self.res.append((alloc_addr, alloc_size))
-                self.process.virtual_protect(alloc_addr, alloc_size, self.protection)
-                self.remain = alloc_size - size
-                self.ptr = alloc_addr + size
-                return alloc_addr
-            else:
-                self.remain -= size
-                res = self.ptr
-                self.ptr += size
-                return res
-
-        def free(self):
-            while self.res:
-                self.process.free(*self.res.pop())
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            self.free()
-
     current: "Process"
 
     def __init__(self, process_id: int):
@@ -330,11 +283,8 @@ class Process:
             value = value.encode(encoding)
         return self.write(address, value)
 
-    def remote_memory(self, size: int):
-        return self.RemoteMemory(self, size)
-
     def name_space(self):
-        return self.Namespace(self)
+        return Namespace(self)
 
     def enum_ldr_data(self):
         pbi = PROCESS_BASIC_INFORMATION()
@@ -370,7 +320,7 @@ class Process:
         if dll_name not in self._cached_scanners or force_new:
             for data in self.enum_ldr_data():
                 if data.BaseDllName.remote_value(self) == dll_name:
-                    self._cached_scanners[dll_name] = self.CachedRawMemoryPatternScanner(
+                    self._cached_scanners[dll_name] = CachedRawMemoryPatternScanner(
                         self, data.DllBase, data.SizeOfImage
                     )
                     break
@@ -554,7 +504,7 @@ class Process:
 
     @functools.cached_property
     def injector(self):
-        return self.Injector(self)
+        return Injector(self)
 
 
 Process.current = Process(Kernel32.GetCurrentProcessId())
